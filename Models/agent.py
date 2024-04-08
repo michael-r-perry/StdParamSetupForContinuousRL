@@ -1,3 +1,4 @@
+import gymnasium as gym
 import os
 import pathlib
 import torch
@@ -18,9 +19,9 @@ class ActorCriticAgent():
             self, 
             policy_class: nn.Module, 
             model_dir: str,
-            obs_dim: int, 
+            observation_space: int, 
+            action_space: int,
             hid_dim: int, 
-            act_dim: int,
             lr: float, 
             device: device,
             deterministic: bool = False
@@ -31,9 +32,9 @@ class ActorCriticAgent():
             Parameters:
                 policy_class - the policy class to use for our actor/critic networks.
                 model_dir - directory where the models will be saved
-                obs_dim - input dimensions as an int
+                observation_space - input data as gymnasium space
+                action_space - output data as gymnasium space
                 hidden_dim - hidden layer dimensions as an int
-                act_dim - output dimensions as an int
                 lr - learning rate of optimizers
                 device - Device (cpu, cuda, ...) on which the code should be run.
                 deterministic - Flag for whether to argmax or sample action outputs
@@ -48,9 +49,11 @@ class ActorCriticAgent():
         self.model_dir = model_dir
 
         # Extract dimension specs
-        self.obs_dim = obs_dim
+        self.obs_space = observation_space
+        self.obs_dim = observation_space.n if isinstance(observation_space, gym.spaces.Discrete) else observation_space.shape[0]
+        self.act_space = action_space
+        self.act_dim = action_space.n if isinstance(observation_space, gym.spaces.Discrete) else action_space.shape[0]
         self.hid_dim = hid_dim
-        self.act_dim = act_dim
 
         # Initialize actor and critic networks
         self.actor = policy_class(self.obs_dim, self.hid_dim, self.act_dim)
@@ -92,7 +95,7 @@ class ActorCriticAgent():
             device = self.device
         # Put observations into Tensor if not
         if not isinstance(obs, torch.Tensor):
-            obs = torch.tensor(obs, dtype=torch.float)
+            obs = torch.tensor(obs, dtype=torch.float, device=device)
         # Standardize observation if needed
         if self.standardizer is not None:
             obs = self.standardizer.standardize(obs)

@@ -14,7 +14,7 @@ from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from Models.agent import ActorCriticAgent
 from Models.network import FeedForwardNN
-from Utils import RolloutBuffer, KIHandler, explained_variance, MovingAverage
+from Utils import RolloutBuffer, explained_variance
 from datetime import datetime
 
 
@@ -48,17 +48,8 @@ class PPO():
         # Set Environment Property
         self.env = env
 
-        if isinstance(env.observation_space, gym.spaces.Discrete):
-            self.obs_dim = env.observation_space.n
-        else:
-            self.obs_dim = env.observation_space.shape[0]
-        if isinstance(env.action_space, gym.spaces.Discrete):
-            self.act_dim = env.action_space.n
-        else:
-            self.act_dim = env.action_space.shape[0]
-
         # Initialize PPO Agent
-        self.agent = ActorCriticAgent(policy_class, model_dir, self.obs_dim, self.hid_dim, self.act_dim, self.lr, self.device)
+        self.agent = ActorCriticAgent(policy_class, model_dir, env.observation_space, env.action_space, self.hid_dim, self.lr, self.device)
         self.agent.safe_load()
         #self.agent.init_standardizer(self.env.get_state_min_maxes())
 
@@ -397,7 +388,6 @@ class PPO():
         # Prepare data to save
         data = {
             "num_timestep": self.num_timestep,
-            "num_ep_timestep": self.num_ep_timestep,
             "num_iteration": self.num_iteration,
             "best_overall_reward": self.best_overall_reward,
         }
