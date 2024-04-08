@@ -60,7 +60,7 @@ class PPO():
         # Initialize PPO Agent
         self.agent = ActorCriticAgent(policy_class, model_dir, self.obs_dim, self.hid_dim, self.act_dim, self.lr, self.device)
         self.agent.safe_load()
-        self.agent.init_standardizer(self.env.get_state_min_maxes())
+        #self.agent.init_standardizer(self.env.get_state_min_maxes())
 
         # Initialize RolloutBuffer
         self.buffer = RolloutBuffer()
@@ -82,11 +82,7 @@ class PPO():
         print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
         print(f"{self.timesteps_per_batch} tiemsteps per batch for a total of {total_timesteps} timesteps")
 
-        # Initialize Env Files for multiprocess
-        self._init_multiproc_env_files()
-
         self.num_timestep = 0 # Timesteps simulated so far
-        self.num_ep_timestep = 0 # Timesteps simulated for the multiprocesses episodes
         self.num_iteration = 0 # Iterations ran so far
 
         # Load Run Config Data if Available
@@ -108,8 +104,6 @@ class PPO():
             traceback.print_exc()
             raise e
         finally:
-            # Delete multiproc env files after training
-            self._del_multiproc_env_files()
             # Save Models
             self.agent.save()
             # Save Config Data
@@ -118,96 +112,72 @@ class PPO():
             torch.cuda.empty_cache()
 
     def rollout(self):
-        # Check to make sure that env is inactive for serializing
-
-        # Make sure that the PyTorch Models are on the CPU and
-        # in shared memory for multiprocessing
-        self.agent.multiproc_prep()
-
         # Clear Buffer and Initialize Data Storage Variables
         self.buffer.clear()
-        batch_ep_acts = [] # Non-flattened actions list (used for logging)
-        batch_best_rews = []
-        batch_ep_entropies = []
 
         t = 0 # Keeps track of how many timesteps we've run so far this 
         
-        # Keep pushing out ensembles of episodes until we run more than or equal to
-        # the specified timesteps per batch
+        # Keep looping over episodes until the batch has reach the minimum
+        # number of timesteps
         while t < self.timesteps_per_batch:
-            # Initialize Manager to use for shared memory of best overall reward
-            with mp.Manager() as manager:
-                best_overall_reward = manager.Value("f", self.best_overall_reward)
-                # Dispatch the ensemble of episodes through multiprocessing
-                with mp.Pool(processes=self.proc_num) as pool:
-                    results = pool.starmap(_episode, zip(
-                        range(self.proc_num),                                           # Process Index
-                        self.multiproc_files,                                           # The environment files each proc will use
-                        [self.env for i in range(self.proc_num)],                       # Copies of inactive env to get passed to each proc
-                        [self.agent for i in range(self.proc_num)],                     # Copies of the Agent to get passed to each proc
-                        [self.max_timesteps_per_episode for i in range(self.proc_num)], # Copies of the max timesteps per episode to get passed to each proc
-                        [best_overall_reward for i in range(self.proc_num)]             # Shared memory value of best overall reward
-                    ))
-                # Save Best Overall Reward
-                self.best_overall_reward = float(best_overall_reward.value)
-            # Go through the results of each episode and add to batch data
-            for ep_obs, ep_acts, ep_log_probs, ep_entropies, ep_rews, ep_t, ep_vals, ep_dones in results:
-                self.buffer.extend_obs(ep_obs)
-                self.buffer.extend_acts(ep_acts)
-                self.buffer.extend_log_probs(ep_log_probs)
-                self.buffer.append_rews(ep_rews)
-                self.buffer.append_lens(ep_t)
-                self.buffer.append_vals(ep_vals)
-                self.buffer.append_dones(ep_dones)
-                batch_ep_acts.append(ep_acts)
-                batch_best_rews.append(np.max(ep_rews))
-                batch_ep_entropies.append(ep_entropies)
-                t += ep_t
+            # Initialize Episode Information
+            ep_obs = [] # observations/states collected per episode
+            ep_acts = [] # actions collected per episode
+            ep_log_probs = [] # log probabilities of actions collected per episode
+            ep_entropies = [] # entropies of the action distribution at each step
+            ep_rews = [] # rewards collected per episode
+            ep_vals = [] # state values collected per episode
+            ep_dones = [] # done flag collected episode
+            ep_t = 0 # timestep of the episode
 
-        # Optuna Reporting
-        if self.trial is not None:
-            # Find which episode had the best reward
-            ep_idx = batch_best_rews.index(max(batch_best_rews))
-            # Find the index in which the step happened for the best reward within the given episode
-            best_rew_idx = self.buffer.rews[ep_idx].index(batch_best_rews[ep_idx])
-            # Get the entropies of the action samples for the steps it took the model to get to that reward
-            entropies_to_best_rew = batch_ep_entropies[ep_idx][:best_rew_idx+1]
-            # Get the mean entropy of the steps
-            mean_entropy = np.mean(entropies_to_best_rew)
-            # Calculate Optuna Metric (Best Reward of batch weighted by entropy of approach that's mapped between 0-1)
-            opt_metric = max(batch_best_rews) * np.interp(-mean_entropy, [-3.6, -2.5], [0, 1])
-            # Add metric to moving average window
-            self.opt_win.add_value(opt_metric)
-            # Report to Optuna
-            self.trial.report(self.opt_win.mean(), self.num_iteration)
+            # Reset the environment before next episode
+            obs, _ = self.env.reset()
+            # Keep looping over timesteps until episode is done
+            done = False
+            while not done:
+                # Track done flag of the current state
+                ep_dones.append(done)
+                # Track observations for this step
+                ep_obs.append(obs)
+
+                # Calculate action and make a step in the env
+                act, log_prob, entropy = self.agent.get_action(obs)
+                val = self.agent.get_value(obs)
+
+                obs, rew, terminated, truncated, _ = self.env.step(act)
+                done = terminated or truncated
+
+                # Track recent reward, action, and action log probability
+                ep_rews.append(rew)
+                ep_vals.append(val.detach())
+                ep_acts.append(act.detach())
+                ep_log_probs.append(log_prob.detach())
+                ep_entropies.append(entropy.detach())
+
+                # Increase timestep
+                ep_t += 1
+
+            # Go through the results of the episode and add to batch data
+            self.buffer.extend_obs(ep_obs)
+            self.buffer.extend_acts(ep_acts)
+            self.buffer.extend_log_probs(ep_log_probs)
+            self.buffer.append_rews(ep_rews)
+            self.buffer.append_lens(ep_t)
+            self.buffer.append_vals(ep_vals)
+            self.buffer.append_dones(ep_dones)
+            t += ep_t
 
         # Move needed buffer data to tensors before finishing rollout batch
         self.buffer.to_tensor(self.device)
 
         # Move PyTorch models back to designated device
         self.agent.set_device()
-
-        # Logging
-        for i in range(0, len(batch_ep_acts), self.proc_num):
-            step = self.num_ep_timestep # Save beginning step for next set of logs
-            for acts in it.zip_longest(*batch_ep_acts[i:i+self.proc_num], fillvalue=np.nan):
-                log_vals = {f'Proc #{i}': act for i, act in enumerate(acts)}
-                self.writer.add_scalars('ep/step_action', log_vals, step)
-                step += 1
-            step = self.num_ep_timestep
-            for acts in it.zip_longest(*self.buffer.rews[i:i+self.proc_num], fillvalue=np.nan):
-                log_vals = {f'Proc #{i}': act for i, act in enumerate(acts)}
-                self.writer.add_scalars('ep/step_reward', log_vals, step)
-                step += 1
-            self.num_ep_timestep = step
             
         # Update num_timestep and num_ep_timestep
         self.num_timestep += t
         flat_batch_rews = [rew for ep in self.buffer.rews for rew in ep]
         self.writer.add_scalar('batch/mean_ep_len', np.mean(self.buffer.lens), self.num_iteration)
-        self.writer.add_scalar('batch/best_reward', np.max(batch_best_rews), self.num_iteration)
         self.writer.add_scalar('batch/mean_reward', np.mean(flat_batch_rews), self.num_timestep)
-        self.writer.add_histogram('batch/action_dist', self.buffer.acts, self.num_iteration)
 
     def train(self):
         # Calculate advantage using GAE

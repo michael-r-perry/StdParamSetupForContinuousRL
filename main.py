@@ -1,12 +1,9 @@
 import gymnasium as gym
+import os
+from Models import PPO
 
-env = gym.make("Hopper-v4", render_mode="human")
+MODEL_DIRPATH = 'Models\\Trained\\ppo_model'
+TENSORBOARD_PATH = 'logs\\ppo'
 
-observation, info = env.reset(seed=42)
-for _ in range(1000):
-    action = env.action_space.sample()
-    observation, reward, terminated, truncated, info = env.step(action)
-    env.render()
-    if terminated or truncated:
-        observation, info = env.reset()
-env.close()
+env = gym.make("Hopper-v4")
+
