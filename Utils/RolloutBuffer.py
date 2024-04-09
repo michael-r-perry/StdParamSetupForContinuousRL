@@ -102,7 +102,15 @@ class RolloutBuffer:
         # Parse obs to np.array if in list
         if isinstance(self.obs, list):
             self.obs = np.array(self.obs)
-        
         self.obs = torch.tensor(self.obs, dtype=torch.float, device=device)
-        self.acts = torch.tensor(self.acts, dtype=torch.float, device=device)
+
+        # Check that there are elements within self.acts
+        if not self.acts:
+            raise Exception("There are no elements within self.acts to move to a tensor")
+        if isinstance(self.acts[0], torch.Tensor) and len(self.acts[0]) > 1:
+            self.acts = torch.stack(self.acts)
+            self.acts = self.acts.to(dtype=torch.float, device=device)
+        else:
+            self.acts = torch.tensor(self.acts, dtype=torch.float, device=device)
+            
         self.log_probs = torch.tensor(self.log_probs, dtype=torch.float, device=device).flatten()

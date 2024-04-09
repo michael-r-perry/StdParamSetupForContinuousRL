@@ -37,8 +37,9 @@ class FeedForwardNN(nn.Module):
                 output - the outpout of our forward pass
         '''
         if not isinstance(obs, Tensor):
-            obs = torch.tensor(obs, dtype=torch.float)
+            obs = torch.tensor(obs, dtype=torch.float, device=self.device)
 
+        
         activation1 = F.tanh(self.fc1(obs))
         activation2 = F.tanh(self.fc2(activation1))
         activation3 = F.tanh(self.fc3(activation2))

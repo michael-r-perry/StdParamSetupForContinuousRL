@@ -50,6 +50,7 @@ class PPO():
 
         # Initialize PPO Agent
         self.agent = ActorCriticAgent(policy_class, model_dir, env.observation_space, env.action_space, self.hid_dim, self.lr, self.device)
+        self.agent.to(self.device)
         self.agent.safe_load()
         #self.agent.init_standardizer(self.env.get_state_min_maxes())
 
@@ -132,10 +133,19 @@ class PPO():
                 ep_obs.append(obs)
 
                 # Calculate action and make a step in the env
-                act, log_prob, entropy = self.agent.get_action(obs)
-                val = self.agent.get_value(obs)
+                with torch.no_grad():
+                    act, log_prob, entropy = self.agent.get_action(obs)
+                    val = self.agent.get_value(obs)
 
-                obs, rew, terminated, truncated, _ = self.env.step(act)
+                # Rescale and perform action
+                clipped_act = act.cpu().numpy()
+
+                if isinstance(self.env.action_space, gym.spaces.Box):
+                    # Clip the actions to avoid out of bound error
+                    # as we are sampling from an unbounded Gaussian distribution
+                    clipped_act = np.clip(clipped_act, self.env.action_space.low, self.env.action_space.high)
+
+                obs, rew, terminated, truncated, _ = self.env.step(clipped_act)
                 done = terminated or truncated
 
                 # Track recent reward, action, and action log probability

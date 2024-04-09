@@ -7,10 +7,10 @@ from typing import Any, Optional, Union
 from torch import nn, device, Tensor
 from torch.optim import Adam
 from torch.distributions import Categorical, MultivariateNormal
-from Utils import Standardizer
+from Utils import Standardizer, CategoricalDistribution, DiagGaussianDistribution
 
 
-class ActorCriticAgent():
+class ActorCriticAgent(nn.Module):
     """
         This is the PPO agent class that has both the actor and critic networks
         and is used in the PPO.py file
@@ -42,6 +42,7 @@ class ActorCriticAgent():
             Return:
                 None
         """
+        super().__init__()
         # Set the device
         self.device = device
 
@@ -61,12 +62,18 @@ class ActorCriticAgent():
         self.critic = policy_class(self.obs_dim, self.hid_dim, 1)
         self.critic.to(self.device)
 
+        # Initialize Action Distribution Class
+        self.log_std_init = 0.0
+        self.log_std = None
+        self.init_action_distribution()
+
         # Set learning rate
         self.lr = lr
 
         # Initialize optimizers for actor and critic
         self.actor_optim = Adam(self.actor.parameters(), lr=lr)
         self.critic_optim = Adam(self.critic.parameters(), lr=lr)
+        self.optim = Adam(self.parameters(recurse=False), lr=0.01)
 
         # Set Deterministic Flag
         self.deterministic = deterministic
@@ -100,13 +107,13 @@ class ActorCriticAgent():
         if self.standardizer is not None:
             obs = self.standardizer.standardize(obs)
         # Query the actor network for a mean action
-        probs = self.actor(obs)
+        output = self.actor(obs)
 
         # Create a distribution with the mean action and std from the covariance matrix above.
         # For more information on how this distribution works, check out Andrew Ng's lecture on it:
         # https://www.youtube.com/watch?v=JjB58InuTqM
         #dist = MultivariateNormal(mean, self.cov_mat)
-        dist = Categorical(logits=probs)
+        dist = self.act_dist.proba_distribution(output, self.log_std)
 
         # Sample an action from the distribution
         action = dist.sample()
@@ -117,8 +124,7 @@ class ActorCriticAgent():
         # If we're testing, just return the deterministic action. Sampling should only be for training
         # as our "exploration" factor.
         if self.deterministic:
-            #return mean, 1
-            return torch.argmax(probs), 1
+            return torch.argmax(output), 1, dist.entropy()
         
         # Return the sampled action and the log probability of that action in our distribution
         return action, log_prob, dist.entropy()
@@ -143,7 +149,7 @@ class ActorCriticAgent():
             device = self.device
         # Put observations into Tensor if not
         if not isinstance(obs, torch.Tensor):
-            obs = torch.tensor(obs, dtype=torch.float)
+            obs = torch.tensor(obs, dtype=torch.float, device=device)
         # Standardize observation if needed
         if self.standardizer is not None:
             obs = self.standardizer.standardize(obs)
@@ -181,8 +187,8 @@ class ActorCriticAgent():
 
         # Calculate the log probabilities of batch actions using most recent actor network.
         # This segment of code is similar to that in get_action()
-        probs = self.actor(batch_obs)
-        dist = Categorical(logits=probs)
+        output = self.actor(batch_obs)
+        dist = self.act_dist.proba_distribution(output, self.log_std)
         log_probs = dist.log_prob(batch_acts)
 
         # Return the value vector V of each observation in the batch and
@@ -205,10 +211,13 @@ class ActorCriticAgent():
         """
         # Calculate gradients and perform backward propagation for actor network
         self.actor_optim.zero_grad()
+        self.optim.zero_grad()
         actor_loss.backward(retain_graph=True)
         # Gradient Clipping with given threshold
         nn.utils.clip_grad_norm_(self.actor.parameters(), max_grad_norm)
+        nn.utils.clip_grad_norm_(self.parameters(recurse=False), max_grad_norm)
         self.actor_optim.step()
+        self.optim.step()
 
         # Calculate gradients and perform backward propagation for critic network
         self.critic_optim.zero_grad()
@@ -225,6 +234,19 @@ class ActorCriticAgent():
             [-1, 1].
         """
         self.standardizer = Standardizer(state_min_max)
+
+    def init_action_distribution(self) -> None:
+        """
+            Initialize the action distribution class based on the type of the
+            action space.
+        """
+        if isinstance(self.act_space, gym.spaces.Discrete):
+            self.act_dist = CategoricalDistribution(self.act_dim, self.device)
+        elif isinstance(self.act_space, gym.spaces.Box):
+            self.act_dist = DiagGaussianDistribution(self.act_dim, self.device)
+            self.log_std = self.act_dist.proba_distribution_params(self.log_std_init)
+        else:
+            raise Exception("This particular action space is not supported. See List: [Discrete, Box]")
     
     def save(self):
         """
